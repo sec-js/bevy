@@ -402,7 +402,7 @@ mod tests {
     use std::println;
 
     use crate::{
-        archetype::{ArchetypeComponentId, Archetypes},
+        archetype::Archetypes,
         bundle::Bundles,
         change_detection::DetectChanges,
         component::{Component, Components},
@@ -410,12 +410,12 @@ mod tests {
         error::Result,
         name::Name,
         prelude::{AnyOf, EntityRef, Trigger},
-        query::{Added, Changed, Or, With, Without},
+        query::{Added, Changed, Or, SpawnDetails, Spawned, With, Without},
         removal_detection::RemovedComponents,
         resource::Resource,
         schedule::{
-            common_conditions::resource_exists, ApplyDeferred, Condition, IntoScheduleConfigs,
-            Schedule,
+            common_conditions::resource_exists, ApplyDeferred, IntoScheduleConfigs, Schedule,
+            SystemCondition,
         },
         system::{
             Commands, In, InMut, IntoSystem, Local, NonSend, NonSendMut, ParamSet, Query, Res,
@@ -1327,6 +1327,25 @@ mod tests {
     }
 
     #[test]
+    fn system_state_spawned() {
+        let mut world = World::default();
+        world.spawn_empty();
+        let spawn_tick = world.change_tick();
+
+        let mut system_state: SystemState<Option<Single<SpawnDetails, Spawned>>> =
+            SystemState::new(&mut world);
+        {
+            let query = system_state.get(&world);
+            assert_eq!(query.unwrap().spawned_at(), spawn_tick);
+        }
+
+        {
+            let query = system_state.get(&world);
+            assert!(query.is_none());
+        }
+    }
+
+    #[test]
     #[should_panic]
     fn system_state_invalid_world() {
         let mut world = World::default();
@@ -1551,68 +1570,21 @@ mod tests {
             let mut sys = IntoSystem::into_system(mutable_query);
             sys.initialize(&mut world);
         }
-    }
 
-    #[test]
-    fn update_archetype_component_access_works() {
-        use std::collections::HashSet;
+        {
+            let mut world = World::new();
 
-        fn a_not_b_system(_query: Query<&A, Without<B>>) {}
+            fn mutable_query(mut query: Query<(&mut A, &mut B, SpawnDetails), Spawned>) {
+                for _ in &mut query {}
 
-        let mut world = World::default();
-        let mut system = IntoSystem::into_system(a_not_b_system);
-        let mut expected_ids = HashSet::<ArchetypeComponentId>::new();
-        let a_id = world.register_component::<A>();
+                immutable_query(query.as_readonly());
+            }
 
-        // set up system and verify its access is empty
-        system.initialize(&mut world);
-        system.update_archetype_component_access(world.as_unsafe_world_cell());
-        let archetype_component_access = system.archetype_component_access();
-        assert!(expected_ids
-            .iter()
-            .all(|id| archetype_component_access.has_component_read(*id)));
+            fn immutable_query(_: Query<(&A, &B, SpawnDetails), Spawned>) {}
 
-        // add some entities with archetypes that should match and save their ids
-        expected_ids.insert(
-            world
-                .spawn(A)
-                .archetype()
-                .get_archetype_component_id(a_id)
-                .unwrap(),
-        );
-        expected_ids.insert(
-            world
-                .spawn((A, C))
-                .archetype()
-                .get_archetype_component_id(a_id)
-                .unwrap(),
-        );
-
-        // add some entities with archetypes that should not match
-        world.spawn((A, B));
-        world.spawn((B, C));
-
-        // update system and verify its accesses are correct
-        system.update_archetype_component_access(world.as_unsafe_world_cell());
-        let archetype_component_access = system.archetype_component_access();
-        assert!(expected_ids
-            .iter()
-            .all(|id| archetype_component_access.has_component_read(*id)));
-
-        // one more round
-        expected_ids.insert(
-            world
-                .spawn((A, D))
-                .archetype()
-                .get_archetype_component_id(a_id)
-                .unwrap(),
-        );
-        world.spawn((A, B, D));
-        system.update_archetype_component_access(world.as_unsafe_world_cell());
-        let archetype_component_access = system.archetype_component_access();
-        assert!(expected_ids
-            .iter()
-            .all(|id| archetype_component_access.has_component_read(*id)));
+            let mut sys = IntoSystem::into_system(mutable_query);
+            sys.initialize(&mut world);
+        }
     }
 
     #[test]
