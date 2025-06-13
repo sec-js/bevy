@@ -26,7 +26,7 @@ struct MessageEvent {
 }
 
 fn edit_message(
-    trigger: Trigger<MessageEvent>,
+    trigger: On<MessageEvent>,
     text: Single<(&mut Text2d, &mut TextColor), With<MessageText>>,
 ) {
     let (mut text, mut color) = text.into_inner();
@@ -44,7 +44,6 @@ fn setup(
         Camera2d,
         Camera {
             clear_color: ClearColorConfig::Custom(BLACK.into()),
-            hdr: true,
             ..Default::default()
         },
         Bloom {
