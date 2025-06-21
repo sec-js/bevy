@@ -76,6 +76,7 @@ pub struct TupleFieldIter<'a> {
 }
 
 impl<'a> TupleFieldIter<'a> {
+    /// Creates a new [`TupleFieldIter`].
     pub fn new(value: &'a dyn Tuple) -> Self {
         TupleFieldIter {
             tuple: value,
@@ -227,8 +228,7 @@ impl DynamicTuple {
         if let Some(represented_type) = represented_type {
             assert!(
                 matches!(represented_type, TypeInfo::Tuple(_)),
-                "expected TypeInfo::Tuple but received: {:?}",
-                represented_type
+                "expected TypeInfo::Tuple but received: {represented_type:?}"
             );
         }
         self.represented_type = represented_type;

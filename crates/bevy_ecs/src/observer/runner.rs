@@ -1,9 +1,11 @@
 use alloc::{boxed::Box, vec};
+use bevy_utils::prelude::DebugName;
 use core::any::Any;
 
 use crate::{
-    component::{ComponentHook, ComponentId, HookContext, Mutable, StorageType},
-    error::{default_error_handler, ErrorContext},
+    component::{ComponentId, Mutable, StorageType},
+    error::{ErrorContext, ErrorHandler},
+    lifecycle::{ComponentHook, HookContext},
     observer::{ObserverDescriptor, ObserverTrigger},
     prelude::*,
     query::DebugCheckedUnwrap,
@@ -20,15 +22,16 @@ pub type ObserverRunner = fn(DeferredWorld, ObserverTrigger, PtrMut, propagate: 
 
 /// An [`Observer`] system. Add this [`Component`] to an [`Entity`] to turn it into an "observer".
 ///
-/// Observers listen for a "trigger" of a specific [`Event`]. Events are triggered by calling [`World::trigger`] or [`World::trigger_targets`].
+/// Observers listen for a "trigger" of a specific [`Event`]. An event can be triggered on the [`World`]
+/// by calling [`World::trigger`], or if the event is an [`EntityEvent`], it can also be triggered for specific
+/// entity targets using [`World::trigger_targets`].
 ///
-/// Note that "buffered" events sent using [`EventReader`] and [`EventWriter`] are _not_ automatically triggered. They must be triggered at a specific
-/// point in the schedule.
+/// Note that [`BufferedEvent`]s sent using [`EventReader`] and [`EventWriter`] are _not_ automatically triggered.
+/// They must be triggered at a specific point in the schedule.
 ///
 /// # Usage
 ///
-/// The simplest usage
-/// of the observer pattern looks like this:
+/// The simplest usage of the observer pattern looks like this:
 ///
 /// ```
 /// # use bevy_ecs::prelude::*;
@@ -38,7 +41,7 @@ pub type ObserverRunner = fn(DeferredWorld, ObserverTrigger, PtrMut, propagate: 
 ///     message: String,
 /// }
 ///
-/// world.add_observer(|trigger: Trigger<Speak>| {
+/// world.add_observer(|trigger: On<Speak>| {
 ///     println!("{}", trigger.event().message);
 /// });
 ///
@@ -59,8 +62,8 @@ pub type ObserverRunner = fn(DeferredWorld, ObserverTrigger, PtrMut, propagate: 
 /// # #[derive(Event)]
 /// # struct Speak;
 /// // These are functionally the same:
-/// world.add_observer(|trigger: Trigger<Speak>| {});
-/// world.spawn(Observer::new(|trigger: Trigger<Speak>| {}));
+/// world.add_observer(|trigger: On<Speak>| {});
+/// world.spawn(Observer::new(|trigger: On<Speak>| {}));
 /// ```
 ///
 /// Observers are systems. They can access arbitrary [`World`] data by adding [`SystemParam`]s:
@@ -72,14 +75,14 @@ pub type ObserverRunner = fn(DeferredWorld, ObserverTrigger, PtrMut, propagate: 
 /// # struct PrintNames;
 /// # #[derive(Component, Debug)]
 /// # struct Name;
-/// world.add_observer(|trigger: Trigger<PrintNames>, names: Query<&Name>| {
+/// world.add_observer(|trigger: On<PrintNames>, names: Query<&Name>| {
 ///     for name in &names {
 ///         println!("{name:?}");
 ///     }
 /// });
 /// ```
 ///
-/// Note that [`Trigger`] must always be the first parameter.
+/// Note that [`On`] must always be the first parameter.
 ///
 /// You can also add [`Commands`], which means you can spawn new entities, insert new components, etc:
 ///
@@ -90,7 +93,7 @@ pub type ObserverRunner = fn(DeferredWorld, ObserverTrigger, PtrMut, propagate: 
 /// # struct SpawnThing;
 /// # #[derive(Component, Debug)]
 /// # struct Thing;
-/// world.add_observer(|trigger: Trigger<SpawnThing>, mut commands: Commands| {
+/// world.add_observer(|trigger: On<SpawnThing>, mut commands: Commands| {
 ///     commands.spawn(Thing);
 /// });
 /// ```
@@ -104,7 +107,7 @@ pub type ObserverRunner = fn(DeferredWorld, ObserverTrigger, PtrMut, propagate: 
 /// # struct A;
 /// # #[derive(Event)]
 /// # struct B;
-/// world.add_observer(|trigger: Trigger<A>, mut commands: Commands| {
+/// world.add_observer(|trigger: On<A>, mut commands: Commands| {
 ///     commands.trigger(B);
 /// });
 /// ```
@@ -113,16 +116,17 @@ pub type ObserverRunner = fn(DeferredWorld, ObserverTrigger, PtrMut, propagate: 
 /// recursively evaluated until there are no commands left, meaning nested triggers all
 /// evaluate at the same time!
 ///
-/// Events can be triggered for entities, which will be passed to the [`Observer`]:
+/// If the event is an [`EntityEvent`], it can be triggered for specific entities,
+/// which will be passed to the [`Observer`]:
 ///
 /// ```
 /// # use bevy_ecs::prelude::*;
 /// # let mut world = World::default();
 /// # let entity = world.spawn_empty().id();
-/// #[derive(Event)]
+/// #[derive(Event, EntityEvent)]
 /// struct Explode;
 ///
-/// world.add_observer(|trigger: Trigger<Explode>, mut commands: Commands| {
+/// world.add_observer(|trigger: On<Explode>, mut commands: Commands| {
 ///     println!("Entity {} goes BOOM!", trigger.target());
 ///     commands.entity(trigger.target()).despawn();
 /// });
@@ -139,7 +143,7 @@ pub type ObserverRunner = fn(DeferredWorld, ObserverTrigger, PtrMut, propagate: 
 /// # let mut world = World::default();
 /// # let e1 = world.spawn_empty().id();
 /// # let e2 = world.spawn_empty().id();
-/// # #[derive(Event)]
+/// # #[derive(Event, EntityEvent)]
 /// # struct Explode;
 /// world.trigger_targets(Explode, [e1, e2]);
 /// ```
@@ -153,14 +157,14 @@ pub type ObserverRunner = fn(DeferredWorld, ObserverTrigger, PtrMut, propagate: 
 /// # let mut world = World::default();
 /// # let e1 = world.spawn_empty().id();
 /// # let e2 = world.spawn_empty().id();
-/// # #[derive(Event)]
+/// # #[derive(Event, EntityEvent)]
 /// # struct Explode;
-/// world.entity_mut(e1).observe(|trigger: Trigger<Explode>, mut commands: Commands| {
+/// world.entity_mut(e1).observe(|trigger: On<Explode>, mut commands: Commands| {
 ///     println!("Boom!");
 ///     commands.entity(trigger.target()).despawn();
 /// });
 ///
-/// world.entity_mut(e2).observe(|trigger: Trigger<Explode>, mut commands: Commands| {
+/// world.entity_mut(e2).observe(|trigger: On<Explode>, mut commands: Commands| {
 ///     println!("The explosion fizzles! This entity is immune!");
 /// });
 /// ```
@@ -175,9 +179,9 @@ pub type ObserverRunner = fn(DeferredWorld, ObserverTrigger, PtrMut, propagate: 
 /// # use bevy_ecs::prelude::*;
 /// # let mut world = World::default();
 /// # let entity = world.spawn_empty().id();
-/// # #[derive(Event)]
+/// # #[derive(Event, EntityEvent)]
 /// # struct Explode;
-/// let mut observer = Observer::new(|trigger: Trigger<Explode>| {});
+/// let mut observer = Observer::new(|trigger: On<Explode>| {});
 /// observer.watch_entity(entity);
 /// world.spawn(observer);
 /// ```
@@ -190,8 +194,8 @@ pub type ObserverRunner = fn(DeferredWorld, ObserverTrigger, PtrMut, propagate: 
 /// [`SystemParam`]: crate::system::SystemParam
 pub struct Observer {
     hook_on_add: ComponentHook,
-    error_handler: Option<fn(BevyError, ErrorContext)>,
-    system: Box<dyn Any + Send + Sync + 'static>,
+    error_handler: Option<ErrorHandler>,
+    system: Box<dyn AnyNamedSystem>,
     pub(crate) descriptor: ObserverDescriptor,
     pub(crate) last_trigger_id: u32,
     pub(crate) despawned_watched_entities: u32,
@@ -229,9 +233,10 @@ impl Observer {
     /// Creates a new [`Observer`] with custom runner, this is mostly used for dynamic event observer
     pub fn with_dynamic_runner(runner: ObserverRunner) -> Self {
         Self {
-            system: Box::new(|| {}),
+            system: Box::new(IntoSystem::into_system(|| {})),
             descriptor: Default::default(),
             hook_on_add: |mut world, hook_context| {
+                let default_error_handler = world.default_error_handler();
                 world.commands().queue(move |world: &mut World| {
                     let entity = hook_context.entity;
                     if let Some(mut observe) = world.get_mut::<Observer>(entity) {
@@ -239,7 +244,7 @@ impl Observer {
                             return;
                         }
                         if observe.error_handler.is_none() {
-                            observe.error_handler = Some(default_error_handler());
+                            observe.error_handler = Some(default_error_handler);
                         }
                         world.register_observer(entity);
                     }
@@ -295,6 +300,11 @@ impl Observer {
     pub fn descriptor(&self) -> &ObserverDescriptor {
         &self.descriptor
     }
+
+    /// Returns the name of the [`Observer`]'s system .
+    pub fn system_name(&self) -> DebugName {
+        self.system.system_name()
+    }
 }
 
 impl Component for Observer {
@@ -348,10 +358,8 @@ fn observer_system_runner<E: Event, B: Bundle, S: ObserverSystem<E, B>>(
         return;
     }
     state.last_trigger_id = last_trigger;
-    // SAFETY: Observer was triggered so must have an `Observer` component.
-    let error_handler = unsafe { state.error_handler.debug_checked_unwrap() };
 
-    let trigger: Trigger<E, B> = Trigger::new(
+    let trigger: On<E, B> = On::new(
         // SAFETY: Caller ensures `ptr` is castable to `&mut T`
         unsafe { ptr.deref_mut() },
         propagate,
@@ -362,22 +370,29 @@ fn observer_system_runner<E: Event, B: Bundle, S: ObserverSystem<E, B>>(
     // - observer was triggered so must have an `Observer` component.
     // - observer cannot be dropped or mutated until after the system pointer is already dropped.
     let system: *mut dyn ObserverSystem<E, B> = unsafe {
-        let system = state.system.downcast_mut::<S>().debug_checked_unwrap();
+        let system: &mut dyn Any = state.system.as_mut();
+        let system = system.downcast_mut::<S>().debug_checked_unwrap();
         &mut *system
     };
 
     // SAFETY:
-    // - `update_archetype_component_access` is called first
     // - there are no outstanding references to world except a private component
     // - system is an `ObserverSystem` so won't mutate world beyond the access of a `DeferredWorld`
     //   and is never exclusive
     // - system is the same type erased system from above
     unsafe {
-        (*system).update_archetype_component_access(world);
+        // Always refresh hotpatch pointers
+        // There's no guarantee that the `HotPatched` event would still be there once the observer is triggered.
+        #[cfg(feature = "hotpatching")]
+        (*system).refresh_hotpatch();
+
         match (*system).validate_param_unsafe(world) {
             Ok(()) => {
                 if let Err(err) = (*system).run_unsafe(trigger, world) {
-                    error_handler(
+                    let handler = state
+                        .error_handler
+                        .unwrap_or_else(|| world.default_error_handler());
+                    handler(
                         err,
                         ErrorContext::Observer {
                             name: (*system).name(),
@@ -389,7 +404,10 @@ fn observer_system_runner<E: Event, B: Bundle, S: ObserverSystem<E, B>>(
             }
             Err(e) => {
                 if !e.skipped {
-                    error_handler(
+                    let handler = state
+                        .error_handler
+                        .unwrap_or_else(|| world.default_error_handler());
+                    handler(
                         e.into(),
                         ErrorContext::Observer {
                             name: (*system).name(),
@@ -402,7 +420,17 @@ fn observer_system_runner<E: Event, B: Bundle, S: ObserverSystem<E, B>>(
     }
 }
 
-/// A [`ComponentHook`] used by [`Observer`] to handle its [`on-add`](`crate::component::ComponentHooks::on_add`).
+trait AnyNamedSystem: Any + Send + Sync + 'static {
+    fn system_name(&self) -> DebugName;
+}
+
+impl<T: Any + System> AnyNamedSystem for T {
+    fn system_name(&self) -> DebugName {
+        self.name()
+    }
+}
+
+/// A [`ComponentHook`] used by [`Observer`] to handle its [`on-add`](`crate::lifecycle::ComponentHooks::on_add`).
 ///
 /// This function exists separate from [`Observer`] to allow [`Observer`] to have its type parameters
 /// erased.
@@ -420,14 +448,12 @@ fn hook_on_add<E: Event, B: Bundle, S: ObserverSystem<E, B>>(
         B::component_ids(&mut world.components_registrator(), &mut |id| {
             components.push(id);
         });
-        if let Some(mut observe) = world.get_mut::<Observer>(entity) {
-            observe.descriptor.events.push(event_id);
-            observe.descriptor.components.extend(components);
+        if let Some(mut observer) = world.get_mut::<Observer>(entity) {
+            observer.descriptor.events.push(event_id);
+            observer.descriptor.components.extend(components);
 
-            if observe.error_handler.is_none() {
-                observe.error_handler = Some(default_error_handler());
-            }
-            let system: *mut dyn ObserverSystem<E, B> = observe.system.downcast_mut::<S>().unwrap();
+            let system: &mut dyn Any = observer.system.as_mut();
+            let system: *mut dyn ObserverSystem<E, B> = system.downcast_mut::<S>().unwrap();
             // SAFETY: World reference is exclusive and initialize does not touch system, so references do not alias
             unsafe {
                 (*system).initialize(world);
@@ -439,7 +465,11 @@ fn hook_on_add<E: Event, B: Bundle, S: ObserverSystem<E, B>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{event::Event, observer::Trigger};
+    use crate::{
+        error::{ignore, DefaultErrorHandler},
+        event::Event,
+        observer::On,
+    };
 
     #[derive(Event)]
     struct TriggerEvent;
@@ -447,7 +477,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "I failed!")]
     fn test_fallible_observer() {
-        fn system(_: Trigger<TriggerEvent>) -> Result {
+        fn system(_: On<TriggerEvent>) -> Result {
             Err("I failed!".into())
         }
 
@@ -462,26 +492,33 @@ mod tests {
         #[derive(Resource, Default)]
         struct Ran(bool);
 
-        fn system(_: Trigger<TriggerEvent>, mut ran: ResMut<Ran>) -> Result {
+        fn system(_: On<TriggerEvent>, mut ran: ResMut<Ran>) -> Result {
             ran.0 = true;
             Err("I failed!".into())
         }
 
+        // Using observer error handler
         let mut world = World::default();
         world.init_resource::<Ran>();
-        let observer = Observer::new(system).with_error_handler(crate::error::ignore);
-        world.spawn(observer);
-        Schedule::default().run(&mut world);
+        world.spawn(Observer::new(system).with_error_handler(ignore));
+        world.trigger(TriggerEvent);
+        assert!(world.resource::<Ran>().0);
+
+        // Using world error handler
+        let mut world = World::default();
+        world.init_resource::<Ran>();
+        world.spawn(Observer::new(system));
+        // Test that the correct handler is used when the observer was added
+        // before the default handler
+        world.insert_resource(DefaultErrorHandler(ignore));
         world.trigger(TriggerEvent);
         assert!(world.resource::<Ran>().0);
     }
 
     #[test]
-    #[should_panic(
-        expected = "Exclusive system `bevy_ecs::observer::runner::tests::exclusive_system_cannot_be_observer::system` may not be used as observer.\nInstead of `&mut World`, use either `DeferredWorld` if you do not need structural changes, or `Commands` if you do."
-    )]
+    #[should_panic]
     fn exclusive_system_cannot_be_observer() {
-        fn system(_: Trigger<TriggerEvent>, _world: &mut World) {}
+        fn system(_: On<TriggerEvent>, _world: &mut World) {}
         let mut world = World::default();
         world.add_observer(system);
     }
