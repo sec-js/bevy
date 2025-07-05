@@ -1,18 +1,20 @@
 pub use bevy_ecs_macros::MapEntities;
-use indexmap::IndexSet;
+use indexmap::{IndexMap, IndexSet};
 
 use crate::{
     entity::{hash_map::EntityHashMap, Entity},
-    identifier::masks::{IdentifierMask, HIGH_MASK},
     world::World,
 };
 
 use alloc::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     vec::Vec,
 };
-use bevy_platform::collections::HashSet;
-use core::{hash::BuildHasher, mem};
+use bevy_platform::collections::{HashMap, HashSet};
+use core::{
+    hash::{BuildHasher, Hash},
+    mem,
+};
 use smallvec::SmallVec;
 
 use super::EntityIndexSet;
@@ -73,9 +75,22 @@ impl<T: MapEntities> MapEntities for Option<T> {
     }
 }
 
-impl<T: MapEntities + Eq + core::hash::Hash, S: BuildHasher + Default> MapEntities
-    for HashSet<T, S>
+impl<K: MapEntities + Eq + Hash, V: MapEntities, S: BuildHasher + Default> MapEntities
+    for HashMap<K, V, S>
 {
+    fn map_entities<E: EntityMapper>(&mut self, entity_mapper: &mut E) {
+        *self = self
+            .drain()
+            .map(|(mut key_entities, mut value_entities)| {
+                key_entities.map_entities(entity_mapper);
+                value_entities.map_entities(entity_mapper);
+                (key_entities, value_entities)
+            })
+            .collect();
+    }
+}
+
+impl<T: MapEntities + Eq + Hash, S: BuildHasher + Default> MapEntities for HashSet<T, S> {
     fn map_entities<E: EntityMapper>(&mut self, entity_mapper: &mut E) {
         *self = self
             .drain()
@@ -87,9 +102,22 @@ impl<T: MapEntities + Eq + core::hash::Hash, S: BuildHasher + Default> MapEntiti
     }
 }
 
-impl<T: MapEntities + Eq + core::hash::Hash, S: BuildHasher + Default> MapEntities
-    for IndexSet<T, S>
+impl<K: MapEntities + Eq + Hash, V: MapEntities, S: BuildHasher + Default> MapEntities
+    for IndexMap<K, V, S>
 {
+    fn map_entities<E: EntityMapper>(&mut self, entity_mapper: &mut E) {
+        *self = self
+            .drain(..)
+            .map(|(mut key_entities, mut value_entities)| {
+                key_entities.map_entities(entity_mapper);
+                value_entities.map_entities(entity_mapper);
+                (key_entities, value_entities)
+            })
+            .collect();
+    }
+}
+
+impl<T: MapEntities + Eq + Hash, S: BuildHasher + Default> MapEntities for IndexSet<T, S> {
     fn map_entities<E: EntityMapper>(&mut self, entity_mapper: &mut E) {
         *self = self
             .drain(..)
@@ -110,6 +138,19 @@ impl MapEntities for EntityIndexSet {
     }
 }
 
+impl<K: MapEntities + Ord, V: MapEntities> MapEntities for BTreeMap<K, V> {
+    fn map_entities<E: EntityMapper>(&mut self, entity_mapper: &mut E) {
+        *self = mem::take(self)
+            .into_iter()
+            .map(|(mut key_entities, mut value_entities)| {
+                key_entities.map_entities(entity_mapper);
+                value_entities.map_entities(entity_mapper);
+                (key_entities, value_entities)
+            })
+            .collect();
+    }
+}
+
 impl<T: MapEntities + Ord> MapEntities for BTreeSet<T> {
     fn map_entities<E: EntityMapper>(&mut self, entity_mapper: &mut E) {
         *self = mem::take(self)
@@ -119,6 +160,14 @@ impl<T: MapEntities + Ord> MapEntities for BTreeSet<T> {
                 entities
             })
             .collect();
+    }
+}
+
+impl<T: MapEntities, const N: usize> MapEntities for [T; N] {
+    fn map_entities<E: EntityMapper>(&mut self, entity_mapper: &mut E) {
+        for entities in self.iter_mut() {
+            entities.map_entities(entity_mapper);
+        }
     }
 }
 
@@ -229,11 +278,9 @@ impl EntityMapper for SceneEntityMapper<'_> {
         // this new entity reference is specifically designed to never represent any living entity
         let new = Entity::from_raw_and_generation(
             self.dead_start.row(),
-            IdentifierMask::inc_masked_high_by(self.dead_start.generation, self.generations),
+            self.dead_start.generation.after_versions(self.generations),
         );
-
-        // Prevent generations counter from being a greater value than HIGH_MASK.
-        self.generations = (self.generations + 1) & HIGH_MASK;
+        self.generations = self.generations.wrapping_add(1);
 
         self.map.insert(source, new);
 
@@ -361,7 +408,10 @@ mod tests {
         // Next allocated entity should be a further generation on the same index
         let entity = world.spawn_empty().id();
         assert_eq!(entity.index(), dead_ref.index());
-        assert!(entity.generation() > dead_ref.generation());
+        assert!(entity
+            .generation()
+            .cmp_approx(&dead_ref.generation())
+            .is_gt());
     }
 
     #[test]
@@ -376,7 +426,10 @@ mod tests {
         // Next allocated entity should be a further generation on the same index
         let entity = world.spawn_empty().id();
         assert_eq!(entity.index(), dead_ref.index());
-        assert!(entity.generation() > dead_ref.generation());
+        assert!(entity
+            .generation()
+            .cmp_approx(&dead_ref.generation())
+            .is_gt());
     }
 
     #[test]
